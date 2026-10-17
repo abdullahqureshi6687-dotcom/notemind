@@ -1,0 +1,42 @@
+# --- Secrets: never commit ---
+.env
+.env.*
+!.env.example
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Saved indexes and model caches ---
+indexes/
+*.faiss
+*.index
+.cache/
+hf_cache/
+
+# --- Your PDFs (often copyrighted course material); keep only the README ---
+data/sample_pdfs/*
+!data/sample_pdfs/README.md
+
+# --- Evaluation outputs are regenerated; un-ignore the ones you want to show ---
+eval/results/*
+!eval/results/.gitkeep
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Streamlit (secrets.toml holds keys if you ever use it) ---
+.streamlit/secrets.toml
+
+# --- OS / editors ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

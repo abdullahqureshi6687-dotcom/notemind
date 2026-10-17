@@ -1,0 +1,49 @@
+# NoteMind configuration. Every value here can be overridden from the Streamlit
+# sidebar at runtime; this file holds the defaults.
+# Relative paths are resolved against the folder that contains this file.
+
+paths:
+  data_dir: data/sample_pdfs        # PDFs used by the eval script and notebook
+  index_dir: indexes                 # saved indexes (git-ignored)
+  eval_set: eval/eval_set.json
+  eval_results_dir: eval/results
+
+chunking:
+  chunk_size: 800        # characters. Keep <= ~1000: all-MiniLM-L6-v2 truncates
+                         # input at 256 tokens, so longer chunks lose their tail.
+  chunk_overlap: 150     # characters shared between consecutive chunks
+  min_chunk_chars: 40    # drop fragments shorter than this (page numbers, headers)
+
+embedding:
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 32
+  device: cpu
+
+retrieval:
+  mode: hybrid           # heap | faiss | bm25 | hybrid
+  dense_backend: faiss   # dense retriever used inside hybrid: heap | faiss
+  top_k: 5               # chunks passed to the LLM
+  candidate_k: 20        # candidates each retriever contributes before fusion
+  rrf_k: 60              # reciprocal rank fusion constant (60 is the value from the original RRF paper)
+  min_similarity: 0.25   # if the best dense cosine score is below this, answer
+                         # "not in your notes" without calling the LLM. Tune with eval.
+
+generation:
+  provider: gemini       # anthropic | gemini | groq
+  models:                # model IDs change often; check each provider's model page
+    anthropic: claude-haiku-5-5
+    gemini: gemini-3.5-flash
+    groq: openai/gpt-oss-20b
+  temperature: 0.1       # ignored for Anthropic (current API no longer accepts it)
+  max_tokens: 1024
+  max_retries: 3         # retries on rate limits / transient server errors
+  timeout_seconds: 60
+  max_context_chars: 12000   # hard cap on retrieved text sent to the LLM
+
+quiz:
+  default_num_questions: 5
+  max_num_questions: 15
+  max_source_chars: 15000    # cap on note text sent when generating a quiz
+
+logging:
+  level: INFO

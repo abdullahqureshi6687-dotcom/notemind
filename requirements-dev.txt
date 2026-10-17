@@ -1,0 +1,6 @@
+# Development-only dependencies: tests, evaluation charts, notebook.
+# Not installed in the deployed Space, which keeps the image smaller.
+-r requirements.txt
+pytest==9.1.1
+matplotlib==3.11.2
+ipykernel==7.4.0

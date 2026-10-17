@@ -1,0 +1,26 @@
+# NoteMind runtime dependencies (verified to install together on Python 3.12, Oct 2026).
+# Windows: plain `pip install -r requirements.txt` gives you the CPU build of torch.
+# Linux/Docker (Hugging Face Spaces): install torch from the CPU index FIRST
+#   (see Dockerfile), otherwise pip pulls ~3 GB of CUDA libraries you can't use.
+
+# --- Core ML ---
+numpy==2.5.4
+torch==2.14.1
+transformers==5.20.1
+sentence-transformers==6.1.0
+faiss-cpu==1.15.1
+rank-bm25==0.2.2
+
+# --- PDF + validation + config ---
+pypdf==6.21.1
+pydantic==2.14.1
+PyYAML==6.0.3
+python-dotenv==1.2.4
+
+# --- LLM providers (only the one you configure needs an API key) ---
+anthropic==1.15.0
+google-genai==2.31.0
+groq==1.7.0
+
+# --- UI ---
+streamlit==1.66.0
