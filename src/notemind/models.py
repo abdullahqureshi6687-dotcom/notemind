@@ -124,6 +124,9 @@ class Answer:
             chunk retrieved, LLM not called), ``"no_index"``, ``"llm"`` (the
             model decided the context was insufficient) or ``None``.
         model: Model that produced the answer, if one was called.
+        invalid_citations: Citations in the answer that do not match any
+            retrieved chunk (a sign the model invented a source).
+        max_similarity: Best cosine score from retrieval, for display/debugging.
     """
 
     text: str
@@ -131,3 +134,5 @@ class Answer:
     refused: bool = False
     refusal_reason: str | None = None
     model: str | None = None
+    invalid_citations: list[str] = field(default_factory=list)
+    max_similarity: float | None = None
