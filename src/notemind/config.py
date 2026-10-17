@@ -312,6 +312,8 @@ def setup_logging(level: str = "INFO") -> None:
         datefmt="%H:%M:%S",
     )
     # Third-party libraries are chatty at INFO; keep their noise down.
+    # pypdf logs a WARNING for every minor PDF quirk; real failures still raise.
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
     for noisy in ("httpx", "urllib3", "sentence_transformers", "transformers", "faiss"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
