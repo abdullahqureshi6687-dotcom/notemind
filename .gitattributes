@@ -1,0 +1,6 @@
+# Store text files with LF line endings in the repo (silences the CRLF warnings on Windows).
+* text=auto eol=lf
+*.pdf binary
+*.png binary
+*.npy binary
+*.faiss binary

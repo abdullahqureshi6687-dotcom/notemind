@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from notemind.config import QuizConfig
-from notemind.llm_client import LLMClient
+from notemind.llm_client import LLMClient, LLMTruncatedError
 from notemind.models import Page
 from notemind.prompts import (
     QUIZ_SYSTEM_PROMPT,
@@ -37,6 +37,18 @@ from notemind.prompts import (
 logger = logging.getLogger(__name__)
 
 NUM_OPTIONS: int = 4
+MAX_QUIZ_TOKENS: int = 16000  # ceiling for the "retry with a bigger budget" step
+
+_CONTROL_OR_SPACE = re.compile(r"[\s\x00-\x1f\x7f]+")
+
+
+def clean_text(value: object) -> str:
+    """Collapse newlines, tabs and control characters into single spaces.
+
+    Model output occasionally contains stray newlines or control characters
+    inside an option, which garbles terminal and UI rendering.
+    """
+    return _CONTROL_OR_SPACE.sub(" ", str(value)).strip()
 
 
 class QuizGenerationError(Exception):
@@ -54,13 +66,13 @@ class QuizQuestion(BaseModel):
 
     @field_validator("question", "explanation")
     @classmethod
-    def _strip(cls, value: str) -> str:
-        return value.strip()
+    def _clean(cls, value: str) -> str:
+        return clean_text(value)
 
     @field_validator("options")
     @classmethod
     def _distinct_options(cls, options: list[str]) -> list[str]:
-        cleaned = [str(opt).strip() for opt in options]
+        cleaned = [clean_text(opt) for opt in options]
         if any(not opt for opt in cleaned):
             raise ValueError("options must not be empty")
         if len({opt.lower() for opt in cleaned}) != len(cleaned):
@@ -195,15 +207,17 @@ class QuizGenerator:
             )
 
         prompt = build_quiz_prompt(notes, n, source_label)
-        max_tokens = 400 + 300 * n  # JSON for one question is roughly 150-250 tokens
-        raw = self.llm.generate(QUIZ_SYSTEM_PROMPT, prompt, json_mode=True, max_tokens=max_tokens)
+        # One question is ~150-250 tokens of JSON. The extra headroom covers
+        # models that spend part of the same budget on hidden "thinking".
+        max_tokens = 1000 + 400 * n
+        raw = self._generate_json(prompt, max_tokens)
 
         try:
             quiz = parse_quiz(raw)
         except ValueError as first_error:
             logger.warning("Quiz output invalid (%s); asking the model to repair it", first_error)
             repair = prompt + "\n\n" + build_quiz_repair_prompt(raw, str(first_error), n)
-            raw = self.llm.generate(QUIZ_SYSTEM_PROMPT, repair, json_mode=True, max_tokens=max_tokens)
+            raw = self._generate_json(repair, max_tokens)
             try:
                 quiz = parse_quiz(raw)
             except ValueError as second_error:
@@ -213,6 +227,25 @@ class QuizGenerator:
                 ) from second_error
 
         return self._finalize(quiz, text_pages, n, source_label, warnings)
+
+    def _generate_json(self, prompt: str, max_tokens: int) -> str:
+        """Call the LLM in JSON mode; if the output is cut off, retry once with double the budget.
+
+        Truncation is a budget problem, not a formatting problem, so asking the
+        model to "repair" truncated JSON would fail the same way.
+        """
+        try:
+            return self.llm.generate(QUIZ_SYSTEM_PROMPT, prompt, json_mode=True, max_tokens=max_tokens)
+        except LLMTruncatedError as exc:
+            bigger = min(max_tokens * 2, MAX_QUIZ_TOKENS)
+            logger.warning("Quiz output truncated (%s); retrying with max_tokens=%d", exc, bigger)
+            try:
+                return self.llm.generate(QUIZ_SYSTEM_PROMPT, prompt, json_mode=True, max_tokens=bigger)
+            except LLMTruncatedError as again:
+                raise QuizGenerationError(
+                    f"The model ran out of output space twice ({again}). "
+                    "Choose fewer questions or a smaller page range."
+                ) from again
 
     def _finalize(
         self,

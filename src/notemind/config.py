@@ -30,6 +30,8 @@ DEFAULT_CONFIG_PATH: Path = PROJECT_ROOT / "config.yaml"
 VALID_MODES: tuple[str, ...] = ("heap", "faiss", "bm25", "hybrid")
 VALID_DENSE_BACKENDS: tuple[str, ...] = ("heap", "faiss")
 VALID_PROVIDERS: tuple[str, ...] = ("anthropic", "gemini", "groq")
+# None = don't send a thinking setting (use the model's default).
+VALID_THINKING_LEVELS: tuple[str | None, ...] = (None, "minimal", "low", "medium", "high")
 
 # Environment variables checked for each provider, in order of preference.
 API_KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
@@ -55,6 +57,7 @@ class PathsConfig:
     index_dir: Path
     eval_set: Path
     eval_results_dir: Path
+    demo_dir: Path
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,7 @@ class GenerationConfig:
     max_retries: int = 3
     timeout_seconds: float = 60.0
     max_context_chars: int = 12000
+    gemini_thinking_level: str | None = "low"
 
     def __post_init__(self) -> None:
         if self.provider not in VALID_PROVIDERS:
@@ -161,6 +165,10 @@ class GenerationConfig:
             raise ConfigError("generation.timeout_seconds must be > 0")
         if self.max_context_chars < 1000:
             raise ConfigError("generation.max_context_chars must be >= 1000")
+        if self.gemini_thinking_level not in VALID_THINKING_LEVELS:
+            raise ConfigError(
+                f"generation.gemini_thinking_level must be one of {VALID_THINKING_LEVELS}"
+            )
 
     @property
     def model(self) -> str:
@@ -245,6 +253,7 @@ def _build_paths(data: dict[str, Any] | None, base_dir: Path) -> PathsConfig:
         "index_dir": "indexes",
         "eval_set": "eval/eval_set.json",
         "eval_results_dir": "eval/results",
+        "demo_dir": "assets/demo",
     }
     merged = {**defaults, **(data or {})}
     _reject_unknown_keys(PathsConfig, merged, "paths")

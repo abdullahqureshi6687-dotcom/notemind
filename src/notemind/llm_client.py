@@ -69,6 +69,18 @@ class LLMEmptyResponseError(LLMError):
     """The model returned no text (blocked, or ran out of tokens)."""
 
 
+class LLMTruncatedError(LLMError):
+    """JSON output was cut off at the token limit, so it can't be parsed.
+
+    Not retried automatically: the same budget would fail the same way. The
+    caller (QuizGenerator) retries with a larger ``max_tokens`` instead.
+    """
+
+    def __init__(self, message: str, partial_text: str = "") -> None:
+        super().__init__(message)
+        self.partial_text = partial_text
+
+
 def _retry_after_seconds(exc: Exception) -> float | None:
     """Read a Retry-After header from an SDK exception, if present."""
     response = getattr(exc, "response", None)
@@ -217,6 +229,8 @@ class AnthropicClient(_StainlessErrorMixin, LLMClient):
                 f"Claude returned no text (stop_reason={response.stop_reason})."
             )
         if response.stop_reason == "max_tokens":
+            if json_mode:
+                raise LLMTruncatedError(f"Output cut off at max_tokens={max_tokens}", text)
             logger.warning("Answer was cut off at max_tokens=%d", max_tokens)
         return text
 
@@ -256,6 +270,10 @@ class GroqClient(_StainlessErrorMixin, LLMClient):
 
         choice = response.choices[0] if response.choices else None
         text = (choice.message.content or "").strip() if choice else ""
+        if text and choice.finish_reason == "length":
+            if json_mode:
+                raise LLMTruncatedError(f"Output cut off at max_tokens={max_tokens}", text)
+            logger.warning("Answer was cut off at max_tokens=%d", max_tokens)
         if not text:
             reason = choice.finish_reason if choice else "no choices"
             raise LLMEmptyResponseError(
@@ -277,6 +295,8 @@ class GeminiClient(LLMClient):
 
         self._types = types
         self._errors = errors
+        # Sent with each request until the model rejects it (then disabled).
+        self._thinking_level = config.gemini_thinking_level
         self._client = genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(timeout=int(config.timeout_seconds * 1000)),  # ms
@@ -292,24 +312,47 @@ class GeminiClient(LLMClient):
             max_output_tokens=max_tokens,
             response_mime_type="application/json" if json_mode else None,
         )
+        if self._thinking_level:
+            gen_config.thinking_config = types.ThinkingConfig(
+                thinking_level=self._thinking_level.upper()
+            )
         try:
             response = self._client.models.generate_content(
                 model=self.model, contents=user, config=gen_config
             )
         except self._errors.APIError as exc:
+            if exc.code == 400 and self._thinking_level and "think" in str(exc).lower():
+                # This model doesn't accept a thinking level: stop sending it.
+                logger.warning(
+                    "%s rejected thinking_level=%s; continuing without it", self.model, self._thinking_level
+                )
+                self._thinking_level = None
+                return self._call(system, user, json_mode=json_mode, max_tokens=max_tokens)
             raise _classify_status(exc.code, str(exc.message or exc), _retry_after_seconds(exc)) from exc
         except httpx.TransportError as exc:  # timeouts, DNS, connection resets
             raise LLMUnavailableError(f"Network problem or timeout: {exc}") from exc
 
         text = (response.text or "").strip()
+        candidate = response.candidates[0] if response.candidates else None
+        reason = getattr(candidate, "finish_reason", None) if candidate else None
+        truncated = str(getattr(reason, "value", reason)) == "MAX_TOKENS"
+        usage = response.usage_metadata
+        thoughts = getattr(usage, "thoughts_token_count", None) if usage else None
+        output = getattr(usage, "candidates_token_count", None) if usage else None
+        budget_note = (
+            f" (budget {max_tokens}: {thoughts or 0} thinking tokens, {output or 0} output tokens)"
+        )
+
         if not text:
-            candidate = response.candidates[0] if response.candidates else None
-            reason = getattr(candidate, "finish_reason", None) if candidate else "no candidates"
             raise LLMEmptyResponseError(
-                f"Gemini returned no text (finish_reason={reason}). 'MAX_TOKENS' means the "
-                "model used its budget thinking: increase generation.max_tokens. 'SAFETY' "
-                "means the request was blocked."
+                f"Gemini returned no text (finish_reason={reason}){budget_note}. 'MAX_TOKENS' "
+                "means the budget ran out: increase generation.max_tokens or lower "
+                "gemini_thinking_level. 'SAFETY' means the request was blocked."
             )
+        if truncated:
+            if json_mode:
+                raise LLMTruncatedError(f"Output cut off at the token limit{budget_note}", text)
+            logger.warning("Answer was cut off at the token limit%s", budget_note)
         return text
 
 

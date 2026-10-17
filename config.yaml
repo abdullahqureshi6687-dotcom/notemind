@@ -7,6 +7,7 @@ paths:
   index_dir: indexes                 # saved indexes (git-ignored)
   eval_set: eval/eval_set.json
   eval_results_dir: eval/results
+  demo_dir: assets/demo             # demo notes for the app's "Try demo notes" button (committed)
 
 chunking:
   chunk_size: 800        # characters. Keep <= ~1000: all-MiniLM-L6-v2 truncates
@@ -39,6 +40,9 @@ generation:
   max_retries: 3         # retries on rate limits / transient server errors
   timeout_seconds: 60
   max_context_chars: 12000   # hard cap on retrieved text sent to the LLM
+  gemini_thinking_level: low # minimal | low | medium | high | null. Gemini's hidden
+                             # "thinking" uses the same token budget as the answer;
+                             # low leaves room for the output. Ignored if unsupported.
 
 quiz:
   default_num_questions: 5
