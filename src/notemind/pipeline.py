@@ -88,6 +88,7 @@ class RAGPipeline:
         self.config = config
         self._embedder = embedder
         self._llm = llm
+        self._api_key: str | None = None  # per-session key typed by the user (bring your own key)
         self._loader = PDFLoader()
 
         self._pages: dict[str, list[Page]] = {}  # source -> pages, insertion order
@@ -291,8 +292,19 @@ class RAGPipeline:
     def llm(self) -> LLMClient:
         """LLM client, created on first use. Raises LLMConfigError without a key."""
         if self._llm is None:
-            self._llm = create_llm_client(self.config.generation)
+            self._llm = create_llm_client(self.config.generation, api_key=self._api_key)
         return self._llm
+
+    def set_api_key(self, api_key: str | None) -> None:
+        """Use a caller-supplied API key instead of the environment (None = environment).
+
+        The Streamlit app uses this for "bring your own key": the key lives only
+        in this pipeline object, i.e. in one browser session's memory.
+        """
+        api_key = (api_key or "").strip() or None
+        if api_key != self._api_key:
+            self._api_key = api_key
+            self._llm = None
 
     def retrieve(
         self, question: str, top_k: int | None = None, mode: str | None = None

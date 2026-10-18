@@ -18,12 +18,21 @@ Retries:
 
 from __future__ import annotations
 
+import importlib
 import logging
 import random
+import re
 import time
 from abc import ABC, abstractmethod
+from types import ModuleType
 
-from notemind.config import API_KEY_ENV_VARS, GenerationConfig, get_api_key
+from notemind.config import (
+    API_KEY_ENV_VARS,
+    OPENAI_COMPATIBLE_BASE_URLS,
+    GenerationConfig,
+    get_api_key,
+    provider_needs_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +67,15 @@ class LLMRateLimitError(LLMError):
 
     retryable = True
 
+    @property
+    def quota_exhausted(self) -> bool:
+        """True when the provider asks us to wait longer than we would ever back off.
+
+        That means a quota (for example a daily free-tier limit) is used up,
+        not a short burst limit, so retrying now is pointless.
+        """
+        return self.retry_after is not None and self.retry_after > MAX_BACKOFF_SECONDS
+
 
 class LLMUnavailableError(LLMError):
     """Timeout, connection problem or provider-side error (5xx)."""
@@ -81,6 +99,56 @@ class LLMTruncatedError(LLMError):
         self.partial_text = partial_text
 
 
+def _import_sdk(module: str, package: str) -> ModuleType:
+    """Import a provider SDK, turning a missing package into a clear LLMConfigError."""
+    try:
+        return importlib.import_module(module)
+    except ImportError as exc:
+        raise LLMConfigError(
+            f"The '{package}' package is not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+
+def format_wait(seconds: float) -> str:
+    """Human-readable duration, e.g. 5580 -> '1 h 33 min', 42 -> '42 s'."""
+    seconds = max(0, int(round(seconds)))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes} min"
+    if minutes:
+        return f"{minutes} min"
+    return f"{secs} s"
+
+
+_DURATION = re.compile(r"(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?", re.IGNORECASE)
+_RETRY_IN = re.compile(r"retry in\s+([\dhms.\s]+)", re.IGNORECASE)
+
+
+def _parse_duration(text: str | None) -> float | None:
+    """Parse '5580s', '1h33m0.09s' or '45.5s' into seconds."""
+    if not text:
+        return None
+    match = _DURATION.fullmatch(text.strip())
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, secs = match.groups()
+    return int(hours or 0) * 3600 + int(minutes or 0) * 60 + float(secs or 0)
+
+
+def _gemini_retry_after(exc: Exception) -> float | None:
+    """Gemini puts the wait in a RetryInfo detail ('5580s') and in the message ('retry in 1h33m')."""
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        for item in (details.get("error") or {}).get("details") or []:
+            if isinstance(item, dict) and str(item.get("@type", "")).endswith("RetryInfo"):
+                parsed = _parse_duration(item.get("retryDelay"))
+                if parsed is not None:
+                    return parsed
+    match = _RETRY_IN.search(str(getattr(exc, "message", "") or exc))
+    return _parse_duration(match.group(1).rstrip(". ")) if match else None
+
+
 def _retry_after_seconds(exc: Exception) -> float | None:
     """Read a Retry-After header from an SDK exception, if present."""
     response = getattr(exc, "response", None)
@@ -96,6 +164,8 @@ def _retry_after_seconds(exc: Exception) -> float | None:
 
 def _classify_status(status: int | None, message: str, retry_after: float | None) -> LLMError:
     """Map an HTTP status code to one of our exception types."""
+    if status == 402:
+        return LLMAuthError(f"Payment required (402): this model or account has no free credits left. {message}")
     if status in (401, 403):
         return LLMAuthError(f"API key rejected ({status}). Check your .env file. {message}")
     if status == 429:
@@ -153,7 +223,8 @@ class LLMClient(ABC):
                 )
                 return text
             except LLMError as exc:
-                if not exc.retryable or attempt == attempts:
+                too_long = exc.retry_after is not None and exc.retry_after > MAX_BACKOFF_SECONDS
+                if not exc.retryable or attempt == attempts or too_long:
                     logger.error("%s call failed (%s): %s", self.provider, type(exc).__name__, exc)
                     raise
                 delay = self._backoff(attempt, exc.retry_after)
@@ -201,7 +272,7 @@ class AnthropicClient(_StainlessErrorMixin, LLMClient):
 
     def __init__(self, model: str, config: GenerationConfig, api_key: str) -> None:
         super().__init__(model, config)
-        import anthropic
+        anthropic = _import_sdk("anthropic", "anthropic")
 
         self._sdk = anthropic
         self._client = anthropic.Anthropic(
@@ -242,7 +313,7 @@ class GroqClient(_StainlessErrorMixin, LLMClient):
 
     def __init__(self, model: str, config: GenerationConfig, api_key: str) -> None:
         super().__init__(model, config)
-        import groq
+        groq = _import_sdk("groq", "groq")
 
         self._sdk = groq
         self._client = groq.Groq(api_key=api_key, timeout=config.timeout_seconds, max_retries=0)
@@ -290,8 +361,9 @@ class GeminiClient(LLMClient):
 
     def __init__(self, model: str, config: GenerationConfig, api_key: str) -> None:
         super().__init__(model, config)
-        from google import genai
-        from google.genai import errors, types
+        genai = _import_sdk("google.genai", "google-genai")
+        errors = _import_sdk("google.genai.errors", "google-genai")
+        types = _import_sdk("google.genai.types", "google-genai")
 
         self._types = types
         self._errors = errors
@@ -321,6 +393,7 @@ class GeminiClient(LLMClient):
                 model=self.model, contents=user, config=gen_config
             )
         except self._errors.APIError as exc:
+            retry_after = _retry_after_seconds(exc) or _gemini_retry_after(exc)
             if exc.code == 400 and self._thinking_level and "think" in str(exc).lower():
                 # This model doesn't accept a thinking level: stop sending it.
                 logger.warning(
@@ -328,7 +401,7 @@ class GeminiClient(LLMClient):
                 )
                 self._thinking_level = None
                 return self._call(system, user, json_mode=json_mode, max_tokens=max_tokens)
-            raise _classify_status(exc.code, str(exc.message or exc), _retry_after_seconds(exc)) from exc
+            raise _classify_status(exc.code, str(exc.message or exc), retry_after) from exc
         except httpx.TransportError as exc:  # timeouts, DNS, connection resets
             raise LLMUnavailableError(f"Network problem or timeout: {exc}") from exc
 
@@ -356,6 +429,72 @@ class GeminiClient(LLMClient):
         return text
 
 
+class OpenAICompatibleClient(_StainlessErrorMixin, LLMClient):
+    """Any provider that implements the OpenAI chat-completions API.
+
+    One class covers OpenRouter, Mistral and a local Ollama server: only the
+    base URL, API key and model ID differ. This is why adding a provider is a
+    config change rather than new code.
+    """
+
+    def __init__(self, model: str, config: GenerationConfig, api_key: str, provider: str,
+                 base_url: str) -> None:
+        super().__init__(model, config)
+        openai = _import_sdk("openai", "openai")
+
+        self.provider = provider
+        self._sdk = openai
+        self._json_mode_supported = True  # switched off if the endpoint rejects it
+        headers = {"X-Title": "NoteMind"} if provider == "openrouter" else None
+        self._client = openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=config.timeout_seconds,
+            max_retries=0,
+            default_headers=headers,
+        )
+
+    def _call(self, system: str, user: str, *, json_mode: bool, max_tokens: int) -> str:
+        kwargs: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": self.config.temperature,
+            "max_tokens": max_tokens,
+        }
+        use_json = json_mode and self._json_mode_supported
+        if use_json:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except self._sdk.BadRequestError as exc:
+            if use_json and ("response_format" in str(exc) or "json" in str(exc).lower()):
+                # Some models behind these APIs don't support JSON mode. The
+                # quiz parser validates (and repairs) the JSON anyway.
+                logger.warning("%s/%s rejected JSON mode; retrying without it", self.provider, self.model)
+                self._json_mode_supported = False
+                return self._call(system, user, json_mode=json_mode, max_tokens=max_tokens)
+            raise self._translate(self._sdk, exc) from exc
+        except self._sdk.APIError as exc:
+            raise self._translate(self._sdk, exc) from exc
+
+        choice = response.choices[0] if response.choices else None
+        text = (choice.message.content or "").strip() if choice and choice.message else ""
+        reason = getattr(choice, "finish_reason", None) if choice else "no choices"
+        if text and reason == "length":
+            if json_mode:
+                raise LLMTruncatedError(f"Output cut off at max_tokens={max_tokens}", text)
+            logger.warning("Answer was cut off at max_tokens=%d", max_tokens)
+        if not text:
+            raise LLMEmptyResponseError(
+                f"{self.provider} returned no text (finish_reason={reason}). "
+                "Free models are sometimes overloaded: try again or pick another model."
+            )
+        return text
+
+
 _PROVIDERS: dict[str, type[LLMClient]] = {
     "anthropic": AnthropicClient,
     "gemini": GeminiClient,
@@ -373,17 +512,22 @@ def create_llm_client(config: GenerationConfig, api_key: str | None = None) -> L
     Raises:
         LLMConfigError: If the provider is unknown or no API key is available.
     """
-    cls = _PROVIDERS.get(config.provider)
-    if cls is None:
-        raise LLMConfigError(f"Unknown provider {config.provider!r}")
-    key = api_key or get_api_key(config.provider)
-    if not key:
-        env_vars = " or ".join(API_KEY_ENV_VARS[config.provider])
+    provider = config.provider
+    if provider not in _PROVIDERS and provider not in OPENAI_COMPATIBLE_BASE_URLS:
+        raise LLMConfigError(f"Unknown provider {provider!r}")
+
+    key = api_key or get_api_key(provider)
+    if not key and provider_needs_key(provider):
+        env_vars = " or ".join(API_KEY_ENV_VARS[provider])
         raise LLMConfigError(
-            f"No API key for {config.provider}. Set {env_vars} in your .env file "
+            f"No API key for {provider}. Set {env_vars} in your .env file "
             "(or as a Secret on Hugging Face Spaces)."
         )
-    return cls(config.model, config, key)  # type: ignore[call-arg]
+
+    if provider in OPENAI_COMPATIBLE_BASE_URLS:
+        # Local servers such as Ollama ignore the key, but the SDK requires one.
+        return OpenAICompatibleClient(config.model, config, key or "not-needed", provider, config.base_url)
+    return _PROVIDERS[provider](config.model, config, key)  # type: ignore[call-arg]
 
 
 def _main() -> int:
@@ -396,13 +540,15 @@ def _main() -> int:
     config = load_config()
     setup_logging(config.log_level)
     gen = config.generation
-    print(f"Provider: {gen.provider}   Model: {gen.model}")
+    print(f"Provider: {gen.provider}   Model: {gen.model}" + (f"   Endpoint: {gen.base_url}" if gen.base_url else ""))
     try:
         client = create_llm_client(gen)
         started = time.perf_counter()
         reply = client.generate("You are a connection test.", "Reply with exactly: OK", max_tokens=200)
     except LLMError as exc:
         print(f"FAILED ({type(exc).__name__}): {exc}")
+        if gen.provider == "ollama":
+            print("Is Ollama running? Install it from ollama.com, then run: ollama pull " + gen.model)
         return 1
     print(f"Reply: {reply!r}   ({time.perf_counter() - started:.1f}s)")
     print("Connection works.")
@@ -410,4 +556,6 @@ def _main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(_main())
+    from notemind.config import run_cli
+
+    raise SystemExit(run_cli(_main))

@@ -249,4 +249,8 @@ def _main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_main(sys.argv[1:]))
+    import sys
+
+    from notemind.config import run_cli
+
+    raise SystemExit(run_cli(lambda: _main(sys.argv[1:])))

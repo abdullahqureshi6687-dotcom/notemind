@@ -16,32 +16,43 @@ once per server process with st.cache_resource and shared by all sessions.
 from __future__ import annotations
 
 import hashlib
+import os
+import sys
+from pathlib import Path
 
 import streamlit as st
 
-from notemind.config import (
+# Make `import notemind` work without `pip install -e .`, which hosting
+# platforms such as Streamlit Community Cloud do not run.
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from notemind.config import (  # noqa: E402
     API_KEY_ENV_VARS,
     VALID_PROVIDERS,
     AppConfig,
     ConfigError,
     EmbeddingConfig,
     get_api_key,
+    provider_needs_key,
     load_config,
     setup_logging,
 )
-from notemind.embedder import Embedder
-from notemind.llm_client import (
+from notemind.embedder import Embedder  # noqa: E402
+from notemind.llm_client import (  # noqa: E402
     LLMAuthError,
     LLMBadRequestError,
     LLMConfigError,
     LLMError,
     LLMRateLimitError,
     LLMUnavailableError,
+    format_wait,
 )
-from notemind.models import Answer
-from notemind.pdf_loader import PDFLoadError
-from notemind.pipeline import RAGPipeline
-from notemind.quiz import Quiz, QuizGenerationError
+from notemind.models import Answer  # noqa: E402
+from notemind.pdf_loader import PDFLoadError  # noqa: E402
+from notemind.pipeline import RAGPipeline  # noqa: E402
+from notemind.quiz import Quiz, QuizGenerationError  # noqa: E402
 
 st.set_page_config(page_title="NoteMind", page_icon="📚", layout="wide")
 
@@ -51,10 +62,33 @@ MODE_LABELS: dict[str, str] = {
     "heap": "Embeddings (from-scratch heap)",
     "bm25": "Keywords (BM25)",
 }
-PROVIDER_LABELS: dict[str, str] = {"gemini": "Google Gemini", "groq": "Groq", "anthropic": "Anthropic Claude"}
+PROVIDER_LABELS: dict[str, str] = {
+    "gemini": "Google Gemini",
+    "groq": "Groq",
+    "anthropic": "Anthropic Claude",
+    "openrouter": "OpenRouter (free models)",
+    "mistral": "Mistral",
+    "ollama": "Ollama (local)",
+}
 
 
 # --------------------------------------------------------------------------- cached resources
+
+
+def export_streamlit_secrets() -> None:
+    """Copy top-level Streamlit secrets into environment variables.
+
+    On Streamlit Community Cloud, API keys are entered as secrets. NoteMind
+    reads keys (and NOTEMIND_PROVIDER / NOTEMIND_MODEL) from the environment,
+    so this makes both deployment styles work. Locally there is usually no
+    secrets file, which is fine.
+    """
+    try:
+        for key, value in st.secrets.items():
+            if isinstance(value, (str, int, float, bool)):
+                os.environ.setdefault(str(key), str(value))
+    except Exception:  # no secrets.toml, or secrets not configured
+        pass
 
 
 @st.cache_resource(show_spinner=False)
@@ -88,6 +122,11 @@ def friendly_error(exc: Exception) -> str:
     if isinstance(exc, LLMAuthError):
         return "🔑 The API key was rejected. Check the key in your .env file (or the Space secret)."
     if isinstance(exc, LLMRateLimitError):
+        if exc.quota_exhausted:
+            return (
+                f"⏳ The free-tier quota for this AI provider is used up. It resets in about "
+                f"{format_wait(exc.retry_after)}. Switch the provider in ⚙️ Settings, or try again later."
+            )
         return "⏳ The AI provider's rate limit was reached. Wait a minute and try again."
     if isinstance(exc, LLMBadRequestError):
         return f"⚙️ The provider rejected the request. Check the model name in config.yaml. Details: {exc}"
@@ -177,6 +216,13 @@ def sidebar(base: AppConfig) -> AppConfig:
                 "LLM provider", providers, index=providers.index(base.generation.provider),
                 format_func=PROVIDER_LABELS.__getitem__,
             )
+            user_key = st.text_input(
+                "Your API key (optional)",
+                type="password",
+                key="user_api_key",
+                help="Use your own key for the selected provider. It stays in this browser "
+                "session's memory only: it is never saved to disk or logged.",
+            )
 
         try:
             config = base.with_overrides(
@@ -193,15 +239,17 @@ def sidebar(base: AppConfig) -> AppConfig:
             st.error(f"Invalid settings: {exc}")
             config = base
 
-        if get_api_key(config.generation.provider) is None:
+        has_key = bool(user_key.strip()) or get_api_key(config.generation.provider) is not None
+        if provider_needs_key(config.generation.provider) and not has_key:
             env_vars = " or ".join(API_KEY_ENV_VARS[config.generation.provider])
             st.warning(
-                f"No API key for {PROVIDER_LABELS[config.generation.provider]}. "
-                f"Set {env_vars} in .env (local) or as a Space secret. "
-                "Retrieval still works; answers and quizzes need the key."
+                f"No API key for {PROVIDER_LABELS[config.generation.provider]}. Paste your own key "
+                f"under ⚙️ Settings, or set {env_vars} in .env (local) or as a deployment secret. "
+                "Search still works; answers and quizzes need a key."
             )
 
     pipeline.update_config(config)
+    pipeline.set_api_key(user_key)
     sync_uploads(files or [])
 
     if pipeline.needs_indexing:
@@ -436,6 +484,7 @@ def about_tab(config: AppConfig) -> None:
 
 
 def main() -> None:
+    export_streamlit_secrets()
     try:
         base = get_base_config()
     except ConfigError as exc:

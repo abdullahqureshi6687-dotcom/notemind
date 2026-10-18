@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field, fields, replace
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ DEFAULT_CONFIG_PATH: Path = PROJECT_ROOT / "config.yaml"
 
 VALID_MODES: tuple[str, ...] = ("heap", "faiss", "bm25", "hybrid")
 VALID_DENSE_BACKENDS: tuple[str, ...] = ("heap", "faiss")
-VALID_PROVIDERS: tuple[str, ...] = ("anthropic", "gemini", "groq")
+VALID_PROVIDERS: tuple[str, ...] = ("anthropic", "gemini", "groq", "openrouter", "mistral", "ollama")
 # None = don't send a thinking setting (use the model's default).
 VALID_THINKING_LEVELS: tuple[str | None, ...] = (None, "minimal", "low", "medium", "high")
 
@@ -38,7 +39,23 @@ API_KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY",),
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "groq": ("GROQ_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY",),
+    "ollama": (),  # runs locally, no key needed
 }
+
+# Providers reached through the generic OpenAI-compatible client, and their
+# default endpoints (override with generation.base_urls in config.yaml).
+OPENAI_COMPATIBLE_BASE_URLS: dict[str, str] = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "ollama": "http://localhost:11434/v1",
+}
+
+
+def provider_needs_key(provider: str) -> bool:
+    """False for local providers (Ollama) that work without an API key."""
+    return bool(API_KEY_ENV_VARS.get(provider))
 
 # all-MiniLM-L6-v2 truncates at 256 word-piece tokens, roughly 1,000-1,200
 # characters of English. Beyond this, the end of each chunk is never embedded.
@@ -139,8 +156,12 @@ class GenerationConfig:
             "anthropic": "claude-haiku-5-5",
             "gemini": "gemini-3.5-flash",
             "groq": "openai/gpt-oss-20b",
+            "openrouter": "openai/gpt-oss-120b:free",
+            "mistral": "mistral-small-latest",
+            "ollama": "llama3.2:3b",
         }
     )
+    base_urls: dict[str, str] = field(default_factory=dict)
     temperature: float = 0.1
     max_tokens: int = 1024
     max_retries: int = 3
@@ -174,6 +195,11 @@ class GenerationConfig:
     def model(self) -> str:
         """Model ID for the currently selected provider."""
         return self.models[self.provider]
+
+    @property
+    def base_url(self) -> str | None:
+        """Endpoint for OpenAI-compatible providers (None for native SDK providers)."""
+        return self.base_urls.get(self.provider) or OPENAI_COMPATIBLE_BASE_URLS.get(self.provider)
 
 
 @dataclass(frozen=True)
@@ -264,6 +290,57 @@ def _build_paths(data: dict[str, Any] | None, base_dir: Path) -> PathsConfig:
     return PathsConfig(**resolved)
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate keys.
+
+    Plain YAML silently keeps the *last* duplicate, so a section pasted twice
+    would quietly override the first one. Failing loudly is safer.
+    """
+
+
+def _construct_mapping_no_duplicates(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):
+    seen: dict = {}
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise ConfigError(
+                f"Duplicate key {key!r} in config.yaml (line {key_node.start_mark.line + 1}; first defined "
+                f"on line {seen[key] + 1}). Delete one of them."
+            )
+        seen[key] = key_node.start_mark.line
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping_no_duplicates)
+
+
+ENV_PROVIDER = "NOTEMIND_PROVIDER"
+ENV_MODEL = "NOTEMIND_MODEL"
+
+
+def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    """Let a deployment pick the LLM without editing config.yaml.
+
+    ``NOTEMIND_PROVIDER`` replaces ``generation.provider`` and ``NOTEMIND_MODEL``
+    replaces that provider's model ID. Useful on hosting platforms where the
+    settings live in secrets/variables, and when a free model ID is retired.
+    """
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+    provider = os.environ.get(ENV_PROVIDER, "").strip()
+    model = os.environ.get(ENV_MODEL, "").strip()
+    if not provider and not model:
+        return raw
+    generation = dict(raw.get("generation") or {})
+    if provider:
+        generation["provider"] = provider
+    if model:
+        models = dict(generation.get("models") or {})
+        models[generation.get("provider", GenerationConfig.provider)] = model
+        generation["models"] = models
+    logger.info("Using environment overrides: provider=%s model=%s", provider or "(config)", model or "(config)")
+    return {**raw, "generation": generation}
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     """Load and validate configuration.
 
@@ -284,7 +361,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         raise ConfigError(f"Config file not found: {config_path}")
 
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        raw = yaml.load(config_path.read_text(encoding="utf-8"), Loader=_StrictLoader) or {}  # noqa: S506
     except yaml.YAMLError as exc:
         raise ConfigError(f"Could not parse {config_path}: {exc}") from exc
     if not isinstance(raw, dict):
@@ -295,6 +372,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     if unknown:
         raise ConfigError(f"Unknown top-level section(s): {sorted(unknown)}")
 
+    raw = _apply_env_overrides(raw)
     base_dir = config_path.resolve().parent
     log_level = str((raw.get("logging") or {}).get("level", "INFO")).upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -323,7 +401,8 @@ def setup_logging(level: str = "INFO") -> None:
     # Third-party libraries are chatty at INFO; keep their noise down.
     # pypdf logs a WARNING for every minor PDF quirk; real failures still raise.
     logging.getLogger("pypdf").setLevel(logging.ERROR)
-    for noisy in ("httpx", "urllib3", "sentence_transformers", "transformers", "faiss"):
+    for noisy in ("httpx", "httpx2", "urllib3", "sentence_transformers", "transformers", "faiss", "google_genai",
+                  "openai", "huggingface_hub"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -341,3 +420,22 @@ def get_api_key(provider: str) -> str | None:
         if value:
             return value
     return None
+
+
+def run_cli(main: Callable[[], int]) -> int:
+    """Run a command-line entry point with short, readable error messages.
+
+    Configuration mistakes and missing packages print one line instead of a
+    long traceback; Ctrl+C exits quietly.
+    """
+    try:
+        return main()
+    except ConfigError as exc:
+        print(f"Config error: {exc}")
+        return 1
+    except ModuleNotFoundError as exc:
+        print(f"Missing package '{exc.name}'. Run: pip install -r requirements.txt")
+        return 1
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        return 130

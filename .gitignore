@@ -19,9 +19,11 @@ hf_cache/
 data/sample_pdfs/*
 !data/sample_pdfs/README.md
 
-# --- Evaluation outputs are regenerated; un-ignore the ones you want to show ---
+# --- Evaluation outputs: commit the report and charts, not the large raw JSON ---
 eval/results/*
 !eval/results/.gitkeep
+!eval/results/results.md
+!eval/results/*.png
 
 # --- Python ---
 __pycache__/

@@ -1,0 +1,25 @@
+# Dependencies for Streamlit Community Cloud.
+# Community Cloud reads the dependency file next to the entrypoint
+# (app/streamlit_app.py) before the one in the repository root, so this file is
+# used for deployment while the root requirements.txt is used locally.
+#
+# The extra index provides the CPU-only build of PyTorch. Without it, Linux
+# installs pull ~3 GB of CUDA libraries that a CPU-only server cannot use.
+# Keep these pins identical to ../requirements.txt (a test checks this).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy==2.5.4
+torch==2.14.1
+transformers==5.20.1
+sentence-transformers==6.1.0
+faiss-cpu==1.15.1
+rank-bm25==0.2.2
+pypdf==6.21.1
+pydantic==2.14.1
+PyYAML==6.0.3
+python-dotenv==1.2.4
+anthropic==1.15.0
+google-genai==2.31.0
+groq==1.7.0
+openai==3.35.1
+streamlit==1.66.0

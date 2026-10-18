@@ -1,7 +1,6 @@
 # Streamlit settings (read from the folder you run `streamlit run` in).
 [server]
 maxUploadSize = 50          # MB per uploaded file
-address = "localhost"       # local only; the Docker deployment overrides this with 0.0.0.0
 
 [browser]
 gatherUsageStats = false

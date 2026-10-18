@@ -1,0 +1,21 @@
+# Keep the image small and never ship secrets or local data.
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+.git/
+.github/
+indexes/
+data/sample_pdfs/*
+!data/sample_pdfs/README.md
+eval/results/*.json
+notebooks/
+tests/
+docs/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+*.egg-info/
+.vscode/
+.idea/

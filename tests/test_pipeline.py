@@ -246,3 +246,44 @@ def test_missing_api_key_gives_a_clear_error(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(llm_module, "get_api_key", lambda provider: None)
     with pytest.raises(llm_module.LLMConfigError, match="GEMINI_API_KEY"):
         llm_module.create_llm_client(GenerationConfig(provider="gemini"))
+
+
+# ----------------------------------------------------------------- quotas
+
+
+def test_exhausted_quota_is_not_retried() -> None:
+    llm = FakeLLM([LLMRateLimitError("quota", retry_after=5580), "never returned"],
+                  config=GenerationConfig(max_retries=3))
+    with mock.patch.object(llm_module.time, "sleep") as sleep, pytest.raises(LLMRateLimitError) as info:
+        llm.generate("system", "user")
+    assert info.value.quota_exhausted
+    assert len(llm.calls) == 1 and sleep.call_count == 0
+
+
+def test_gemini_retry_delay_is_parsed_from_the_error() -> None:
+    from google.genai import errors
+
+    body = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                      "message": "Quota exceeded for metric: free_tier_requests, limit: 20. Please retry in 1h33m0.09s.",
+                      "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "5580s"}]}}
+    assert llm_module._gemini_retry_after(errors.ClientError(429, body)) == 5580
+    body["error"]["details"] = []  # fall back to the "retry in ..." text
+    assert llm_module._gemini_retry_after(errors.ClientError(429, body)) == pytest.approx(5580.09)
+
+
+def test_format_wait() -> None:
+    assert llm_module.format_wait(5580) == "1 h 33 min"
+    assert llm_module.format_wait(150) == "2 min"
+    assert llm_module.format_wait(42) == "42 s"
+
+
+# ----------------------------------------------------------------- config file
+
+
+def test_duplicate_config_keys_are_rejected(tmp_path) -> None:
+    from notemind.config import ConfigError, load_config
+
+    bad = tmp_path / "config.yaml"
+    bad.write_text("generation:\n  provider: openrouter\n\n  provider: gemini\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"Duplicate key .provider. in config.yaml \(line 4"):
+        load_config(bad)
