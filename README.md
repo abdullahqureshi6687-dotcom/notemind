@@ -14,7 +14,7 @@ The whole retrieval pipeline is written from scratch, without LangChain or Llama
 page-aware PDF ingestion, chunking, a hand-written heap top-k search, FAISS, BM25, and hybrid
 search with Reciprocal Rank Fusion.
 
-**Live demo:** _add your Streamlit Community Cloud link here_ · **Deployment guide:** [DEPLOYMENT.md](DEPLOYMENT.md)
+**Live demo:** https://notemind-app.streamlit.app/ · **Deployment guide:** [DEPLOYMENT.md](DEPLOYMENT.md)
 
 <!-- Add screenshots to docs/ and uncomment:
 ![Answer with sources](docs/answer.png)
