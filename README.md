@@ -16,10 +16,8 @@ search with Reciprocal Rank Fusion.
 
 **Live demo:** https://notemind-app.streamlit.app/ · **Deployment guide:** [DEPLOYMENT.md](DEPLOYMENT.md)
 
-<!-- Add screenshots to docs/ and uncomment:
 ![Answer with sources](docs/answer.png)
 ![Quiz](docs/quiz.png)
--->
 
 ---
 
