@@ -44,6 +44,7 @@ from notemind.llm_client import (  # noqa: E402
     LLMAuthError,
     LLMBadRequestError,
     LLMConfigError,
+    LLMEmptyResponseError,
     LLMError,
     LLMRateLimitError,
     LLMUnavailableError,
@@ -128,10 +129,18 @@ def friendly_error(exc: Exception) -> str:
                 f"{format_wait(exc.retry_after)}. Switch the provider in ⚙️ Settings, or try again later."
             )
         return "⏳ The AI provider's rate limit was reached. Wait a minute and try again."
+    # Raw provider responses can contain account IDs and internal details, so
+    # the UI shows a short message; the full error is in the server log.
     if isinstance(exc, LLMBadRequestError):
-        return f"⚙️ The provider rejected the request. Check the model name in config.yaml. Details: {exc}"
-    if isinstance(exc, LLMUnavailableError):
+        return (
+            "⚙️ The AI model is not available right now (the provider rejected the request). "
+            "Free models are sometimes retired or offline: try again in a minute, or choose "
+            "another provider in ⚙️ Settings."
+        )
+    if isinstance(exc, (LLMUnavailableError, LLMEmptyResponseError)):
         return "🌐 The AI service is busy or unreachable right now. Please try again shortly."
+    if isinstance(exc, LLMError):
+        return "⚠️ The AI provider returned an unexpected error. Please try again shortly."
     return f"⚠️ {exc}"
 
 

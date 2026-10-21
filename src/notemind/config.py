@@ -161,6 +161,10 @@ class GenerationConfig:
             "ollama": "llama3.2:3b",
         }
     )
+    # Backup model IDs per provider, tried in order when the main model fails
+    # (retired, overloaded, rate-limited). Free models fail often, so a public
+    # demo should always have at least one backup.
+    fallback_models: dict[str, list[str]] = field(default_factory=dict)
     base_urls: dict[str, str] = field(default_factory=dict)
     temperature: float = 0.1
     max_tokens: int = 1024
@@ -176,6 +180,13 @@ class GenerationConfig:
             )
         if self.provider not in self.models or not self.models[self.provider]:
             raise ConfigError(f"generation.models has no model ID for provider {self.provider!r}")
+        for name, backups in self.fallback_models.items():
+            if not isinstance(backups, (list, tuple)) or not all(
+                isinstance(m, str) and m.strip() for m in backups
+            ):
+                raise ConfigError(
+                    f"generation.fallback_models.{name} must be a list of model IDs, got {backups!r}"
+                )
         if not 0.0 <= self.temperature <= 2.0:
             raise ConfigError("generation.temperature must be in [0, 2]")
         if self.max_tokens < 64:
@@ -195,6 +206,12 @@ class GenerationConfig:
     def model(self) -> str:
         """Model ID for the currently selected provider."""
         return self.models[self.provider]
+
+    @property
+    def model_chain(self) -> list[str]:
+        """Main model first, then its backups, without duplicates."""
+        chain = [self.model, *self.fallback_models.get(self.provider, [])]
+        return list(dict.fromkeys(m.strip() for m in chain))
 
     @property
     def base_url(self) -> str | None:
@@ -316,28 +333,41 @@ _StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _c
 
 ENV_PROVIDER = "NOTEMIND_PROVIDER"
 ENV_MODEL = "NOTEMIND_MODEL"
+ENV_FALLBACK_MODELS = "NOTEMIND_FALLBACK_MODELS"
 
 
 def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     """Let a deployment pick the LLM without editing config.yaml.
 
-    ``NOTEMIND_PROVIDER`` replaces ``generation.provider`` and ``NOTEMIND_MODEL``
-    replaces that provider's model ID. Useful on hosting platforms where the
-    settings live in secrets/variables, and when a free model ID is retired.
+    ``NOTEMIND_PROVIDER`` replaces ``generation.provider``, ``NOTEMIND_MODEL``
+    replaces that provider's model ID, and ``NOTEMIND_FALLBACK_MODELS`` (comma
+    separated) replaces its backup models. Useful on hosting platforms where
+    the settings live in secrets/variables, and when a free model ID is retired.
     """
     load_dotenv(PROJECT_ROOT / ".env", override=False)
     provider = os.environ.get(ENV_PROVIDER, "").strip()
     model = os.environ.get(ENV_MODEL, "").strip()
-    if not provider and not model:
+    fallbacks_raw = os.environ.get(ENV_FALLBACK_MODELS)
+    if not provider and not model and fallbacks_raw is None:
         return raw
     generation = dict(raw.get("generation") or {})
     if provider:
         generation["provider"] = provider
+    active = generation.get("provider", GenerationConfig.provider)
     if model:
         models = dict(generation.get("models") or {})
-        models[generation.get("provider", GenerationConfig.provider)] = model
+        models[active] = model
         generation["models"] = models
-    logger.info("Using environment overrides: provider=%s model=%s", provider or "(config)", model or "(config)")
+    if fallbacks_raw is not None:
+        backups = dict(generation.get("fallback_models") or {})
+        backups[active] = [m.strip() for m in fallbacks_raw.split(",") if m.strip()]
+        generation["fallback_models"] = backups
+    logger.info(
+        "Using environment overrides: provider=%s model=%s fallbacks=%s",
+        provider or "(config)",
+        model or "(config)",
+        "(config)" if fallbacks_raw is None else fallbacks_raw,
+    )
     return {**raw, "generation": generation}
 
 

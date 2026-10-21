@@ -38,10 +38,15 @@ environment variables that NoteMind reads at startup:
 | Variable | Example | Effect |
 |---|---|---|
 | `NOTEMIND_PROVIDER` | `openrouter` | replaces `generation.provider` |
-| `NOTEMIND_MODEL` | `nvidia/nemotron-3-super-120b-a12b:free` | replaces that provider's model ID |
+| `NOTEMIND_MODEL` | `minimax/minimax-m3.1-flash:free` | replaces that provider's model ID |
+| `NOTEMIND_FALLBACK_MODELS` | `nvidia/nemotron-3-ultra-550b-a55b:free,openrouter/free` | comma-separated backup models, tried in order when the main model fails |
 
 This is useful because free model IDs are retired often: you can switch models from the
-hosting dashboard without a new commit.
+hosting dashboard without a new commit. Always give a public demo at least one backup model.
+When the main model fails with a model-level error (retired model, 404 from the upstream host,
+rate limit, outage, empty reply), NoteMind moves straight on to the next backup, and a backup that
+works becomes the model used for the rest of that browser session. `openrouter/free` makes a good
+last backup: it is OpenRouter's router that picks any free model that is up right now.
 
 ---
 
@@ -74,7 +79,8 @@ The app adds `src/` to Python's import path itself, so no `pip install -e .` ste
      ```toml
      OPENROUTER_API_KEY = "sk-or-..."
      NOTEMIND_PROVIDER = "openrouter"
-     NOTEMIND_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+     NOTEMIND_MODEL = "minimax/minimax-m3.1-flash:free"
+     NOTEMIND_FALLBACK_MODELS = "nvidia/nemotron-3-ultra-550b-a55b:free,openrouter/free"
      ```
 
      Keep these **at the top level** (no `[section]` header): Streamlit exposes top-level secrets
@@ -175,7 +181,7 @@ in couldn't reach Docker Hub), so treat your first build as the real test and ch
 |---|---|
 | "No API key for …" warning | The secret name doesn't match the provider (see the table in the README), or it is inside a `[section]` in the TOML. |
 | "free-tier quota is used up" | The shared key hit its daily limit. Switch `NOTEMIND_MODEL`/`NOTEMIND_PROVIDER`, or paste your own key in ⚙️ Settings. |
-| `LLMBadRequestError` with 404 | The free model ID was retired. Pick a current `:free` ID at openrouter.ai/models and update `NOTEMIND_MODEL`. |
+| "The AI model is not available right now" | The main model and every backup failed, for example a retired free model or a 404 such as "Function … Not found" from the upstream host. Check the app log for details, pick current `:free` IDs at openrouter.ai/models, and update `NOTEMIND_MODEL` and `NOTEMIND_FALLBACK_MODELS`. |
 | App runs out of memory | Very large uploads. Keep PDFs under the 50 MB upload limit and avoid uploading dozens of files at once. |
 | Uploads fail with 403 on Hugging Face | Make sure the XSRF line in the Dockerfile is present. |
 | Build fails installing torch | Check that `app/requirements.txt` (Streamlit Cloud) or the Dockerfile still points at the CPU index and that `torch==2.14.1` is available for Python 3.12. |

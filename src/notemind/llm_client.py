@@ -99,6 +99,17 @@ class LLMTruncatedError(LLMError):
         self.partial_text = partial_text
 
 
+# Errors that depend on the model, so a backup model may succeed where this one
+# failed. Key, config and truncation errors are excluded: switching model would
+# not fix them.
+FALLBACK_ERRORS: tuple[type[LLMError], ...] = (
+    LLMBadRequestError,
+    LLMRateLimitError,
+    LLMUnavailableError,
+    LLMEmptyResponseError,
+)
+
+
 def _import_sdk(module: str, package: str) -> ModuleType:
     """Import a provider SDK, turning a missing package into a clear LLMConfigError."""
     try:
@@ -187,6 +198,8 @@ class LLMClient(ABC):
     def __init__(self, model: str, config: GenerationConfig) -> None:
         self.model = model
         self.config = config
+        # Backups only apply when this client runs the configured main model.
+        self.model_chain: list[str] = config.model_chain if model == config.model else [model]
 
     def generate(
         self,
@@ -198,6 +211,14 @@ class LLMClient(ABC):
     ) -> str:
         """Send one system + user message and return the model's text.
 
+        Tries the current model first, then each backup in
+        ``generation.fallback_models``. A model that fails with a model-level
+        error (unknown or retired model, rate limit, outage, empty reply) is
+        skipped at once while backups remain; only the last model in the chain
+        gets the full retry policy. Key and setup errors are never retried on
+        another model, because they would fail the same way. After a backup
+        succeeds it becomes the current model, so later calls start with it.
+
         Args:
             system: Instructions (the "rules").
             user: The request, including retrieved context.
@@ -206,10 +227,39 @@ class LLMClient(ABC):
             max_tokens: Override ``config.max_tokens`` for this call.
 
         Raises:
-            LLMError: A subclass describing what went wrong, after retries.
+            LLMError: A subclass describing what went wrong, after retries
+                and backups.
         """
+        chain = [self.model, *(m for m in self.model_chain if m != self.model)]
+        original = self.model
+        for index, model in enumerate(chain):
+            is_last = index == len(chain) - 1
+            self.model = model
+            try:
+                text = self._generate_with_retries(system, user, json_mode, max_tokens, retry=is_last)
+            except FALLBACK_ERRORS as exc:
+                if is_last:
+                    self.model = original
+                    raise
+                logger.warning(
+                    "%s/%s failed (%s); trying backup model %s",
+                    self.provider, model, type(exc).__name__, chain[index + 1],
+                )
+                continue
+            except LLMError:
+                self.model = original
+                raise
+            if model != original:
+                logger.info("%s: switched from %s to backup model %s", self.provider, original, model)
+            return text
+        raise LLMError("unreachable")  # pragma: no cover
+
+    def _generate_with_retries(
+        self, system: str, user: str, json_mode: bool, max_tokens: int | None, *, retry: bool
+    ) -> str:
+        """Call ``self.model``, retrying transient errors when ``retry`` is True."""
         max_tokens = max_tokens or self.config.max_tokens
-        attempts = self.config.max_retries + 1
+        attempts = self.config.max_retries + 1 if retry else 1
         for attempt in range(1, attempts + 1):
             started = time.perf_counter()
             try:

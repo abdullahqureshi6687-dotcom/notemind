@@ -30,14 +30,18 @@ retrieval:
                          # "not in your notes" without calling the LLM. Tune with eval.
 
 generation:
-  provider: openrouter       # gemini | groq | anthropic | openrouter | mistral | ollama
+  provider: openrouter   # gemini | groq | anthropic | openrouter | mistral | ollama
   models:                # model IDs change often; check each provider's model page
     anthropic: claude-haiku-5-5
     gemini: gemini-3.5-flash
     groq: openai/gpt-oss-20b
-    openrouter: nvidia/nemotron-3-super-120b-a12b:free
+    openrouter: minimax/minimax-m3.1-flash:free   # any current ":free" ID at openrouter.ai/models
     mistral: mistral-small-latest
-    ollama: llama3.2:3b
+    ollama: llama3.2:3b                    # a model you have pulled with `ollama pull`
+  fallback_models:       # tried in order when the main model fails (retired, overloaded, rate-limited)
+    openrouter:
+      - nvidia/nemotron-3-ultra-550b-a55b:free
+      - openrouter/free  # OpenRouter's router: picks any free model that is up right now
   base_urls: {}          # optional endpoint overrides for openrouter / mistral / ollama
   temperature: 0.1       # ignored for Anthropic (current API no longer accepts it)
   max_tokens: 1024
